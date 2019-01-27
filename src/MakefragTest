@@ -73,6 +73,7 @@ TESTS_SRCFILES := \
 		  src/FileLoggerTest.cc \
 		  src/HashTableTest.cc \
 		  src/HistogramTest.cc \
+		  src/HomaTransportTest.cc \
 		  src/IndexKeyTest.cc \
 		  src/IndexletManagerTest.cc \
 		  src/IndexLookupTest.cc \
@@ -278,7 +279,7 @@ endif
 # does *not* use the normal compilation flags, since we only want installed
 # info to be available.
 testInstall: install
-	$(CXX) --std=c++11 $(GLIBCXX_ABI) -g -DNDEBUG -Iinstall/include -I. \
+	$(CXX) --std=$(CXX_STANDARD) $(GLIBCXX_ABI) -g -DNDEBUG -Iinstall/include -I. \
 	        src/TestClient.cc -o $(OBJDIR)/TestClient -Linstall/lib/ramcloud/ \
 	        -lramcloud -Wl,-rpath=install/bin $(TEST_INSTALL_FLAGS)
 

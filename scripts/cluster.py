@@ -54,24 +54,32 @@ server_locator_templates = {
     'tcp-1g': 'tcp:host=%(host1g)s,port=%(port)d',
     'basic+udp': 'basic+udp:host=%(host)s,port=%(port)d',
     'basic+udp-1g': 'basic+udp:host=%(host1g)s,port=%(port)d',
+    'homa+udp': 'homa+udp:host=%(host)s,port=%(port)d',
+    'homa+udp-1g': 'homa+udp:host=%(host1g)s,port=%(port)d',
     'unreliable+udp': 'unreliable+udp:host=%(host)s,port=%(port)d',
     'infrc': 'infrc:host=%(host)s,port=%(port)d',
     'basic+infud': 'basic+infud:host=%(host1g)s',
+    'homa+infud': 'homa+infud:host=%(host1g)s',
     'unreliable+infud': 'unreliable+infud:host=%(host1g)s',
     'unreliable+infeth': 'unreliable+infeth:mac=00:11:22:33:44:%(id)02x',
     'basic+dpdk': 'basic+dpdk:',
+    'homa+dpdk': 'homa+dpdk:',
 }
 coord_locator_templates = {
     'tcp': 'tcp:host=%(host)s,port=%(port)d',
     'tcp-1g': 'tcp:host=%(host1g)s,port=%(port)d',
     'basic+udp': 'basic+udp:host=%(host)s,port=%(port)d',
     'basic+udp-1g': 'basic+udp:host=%(host1g)s,port=%(port)d',
+    'homa+udp': 'homa+udp:host=%(host)s,port=%(port)d',
+    'homa+udp-1g': 'homa+udp:host=%(host1g)s,port=%(port)d',
     'unreliable+udp': 'unreliable+udp:host=%(host)s,port=%(port)d',
     'infrc': 'infrc:host=%(host)s,port=%(port)d',
     # Coordinator uses udp even when rest of cluster uses infud
     # or dpdk.
     'basic+infud': 'basic+udp:host=%(host)s,port=%(port)d',
+    'homa+infud': 'homa+udp:host=%(host)s,port=%(port)d',
     'basic+dpdk': 'basic+udp:host=%(host)s,port=%(port)d',
+    'homa+dpdk': 'homa+udp:host=%(host)s,port=%(port)d',
 }
 
 def server_locator(transport, host, port=server_port):
@@ -134,8 +142,8 @@ class Cluster(object):
     @ivar transport: Transport name to use for servers
                      (see server_locator_templates) (default: basic+infud).
     @ivar replicas: Replication factor to use for each log segment. (default: 3)
-    @ivar disk: Server args for specifying the storage device to use for
-                backups (default: default_disk1 taken from {,local}config.py).
+    @ivar disks: Server args for specifying the storage device to use for
+                backups (default: default_disks taken from {,local}config.py).
     @ivar disjunct: Disjunct (not collocate) entities on each server.
 
     === Other Stuff ===
@@ -184,7 +192,7 @@ class Cluster(object):
         self.verbose = False
         self.transport = 'basic+infud'
         self.replicas = 3
-        self.disk = default_disk1
+        self.disk = default_disks
         self.disjunct = False
 
         if cluster_name_exists: # do nothing if it exists
@@ -520,17 +528,11 @@ class Cluster(object):
 def run(
         num_servers=4,             # Number of hosts on which to start
                                    # servers (not including coordinator).
-        backup_disks_per_server=2, # Number of backup disks to use on each
-                                   # server host (0, 1, or 2).
         replicas=3,                # Replication factor to use for each
                                    # log segment.
-        disk1=default_disk1,       # Server arguments specifying the
-                                   # backing device when one backup disk
-                                   # is used on each server.
-        disk2=default_disk2,       # Server arguments specifying the
-                                   # backing devices when two backup disks
-                                   # are used on each server
-                                   # (if backup_disks_per_server= 2).
+        disk=default_disks,        # Server arguments specifying the
+                                   # backing devices as a comma-separated list
+                                   # prefixed by `-f`.
         timeout=20,                # How many seconds to wait for the
                                    # clients to complete.
         coordinator_args='',       # Additional arguments for the
@@ -544,6 +546,8 @@ def run(
                                    # log files.  A separate subdirectory
                                    # will be created in this directory
                                    # for the log files from this run.
+        config_dir='config',       # Directory containing RAMCloud
+                                   # configuration files.
         client=None,               # Command-line to invoke for each client
                                    # additional arguments will be prepended
                                    # with configuration information such as
@@ -577,6 +581,7 @@ def run(
         enable_logcabin=False,     # Do not enable logcabin.
         dpdk_port=None,            # Do not enable DpdkDriver.
         superuser=False,           # Do not start cluster as superuser by default.
+        hugepage=False,            # Do not use hugepage memory by default.
         valgrind=False,            # Do not run under valgrind
         valgrind_args='',          # Additional arguments for valgrind
         disjunct=False,            # Disjunct entities on a server
@@ -628,15 +633,23 @@ def run(
         cluster.transport = transport
         cluster.replicas = replicas
         cluster.timeout = timeout
-        cluster.disk = disk1
+        cluster.disk = disk
         cluster.enable_logcabin = enable_logcabin
         cluster.disjunct = disjunct
         cluster.hosts = getHosts()
+        if hugepage:
+            # Only the master can take advantage of the hugepage
+            master_args += ' --hugepage'
         if dpdk_port is not None:
             coordinator_args += ' --dpdkPort %d' % dpdk_port
             master_args += ' --dpdkPort %d' % dpdk_port
             if client:
                 client += ' --dpdkPort %d' % dpdk_port
+        if config_dir is not None:
+            coordinator_args += ' --configDir %s' % config_dir
+            master_args += ' --configDir %s' % config_dir
+            if client:
+                client += ' --configDir %s' % config_dir
 
         if not coordinator_host:
             coordinator_host = cluster.hosts[-1]
@@ -656,11 +669,11 @@ def run(
             backup = False
             args = master_args
             disk_args = None
-            if backup_disks_per_server > 0:
+            if disk != None:
                 backup = True
                 args += ' %s' % backup_args
                 backups_started += 1
-                disk_args = disk1 if backup_disks_per_server == 1 else disk2
+                disk_args = disk
             cluster.start_server(host, args, backup=backup, disk=disk_args)
             masters_started += 1
 
@@ -707,10 +720,6 @@ if __name__ == '__main__':
             dest='backup_args',
             help='Additional command-line arguments to pass to '
                  'each backup')
-    parser.add_option('-b', '--backupDisks', type=int, default=1,
-            metavar='N', dest='backup_disks_per_server',
-            help='Number of backup disks to run on each server host '
-                 '(0, 1, or 2)')
     parser.add_option('--client', metavar='ARGS',
             help='Command line to invoke the client application '
                  '(additional arguments will be inserted at the beginning '
@@ -726,10 +735,9 @@ if __name__ == '__main__':
     parser.add_option('--debug', action='store_true', default=False,
             help='Pause after starting servers but before running '
                  'clients to enable debugging setup')
-    parser.add_option('--disk1', default=default_disk1,
-            help='Server arguments to specify disk for first backup')
-    parser.add_option('--disk2', default=default_disk2,
-            help='Server arguments to specify disk for second backup')
+    parser.add_option('--disks', default=default_disks, dest="disk",
+            help='Server arguments to specify disks used for backup; '
+                  'format is -f followed by a comma separated list.')
     parser.add_option('-l', '--logLevel', default='NOTICE',
             choices=['DEBUG', 'NOTICE', 'WARNING', 'ERROR', 'SILENT'],
             metavar='L', dest='log_level',
@@ -739,6 +747,10 @@ if __name__ == '__main__':
             dest='log_dir',
             help='Top level directory for log files; the files for '
                  'each invocation will go in a subdirectory.')
+    parser.add_option('--configDir', default='config',
+            metavar='DIR',
+            dest='config_dir',
+            help='Directory containing RAMCloud configuration files.')
     parser.add_option('--masterArgs', metavar='ARGS', default='',
             dest='master_args',
             help='Additional command-line arguments to pass to '
@@ -774,6 +786,8 @@ if __name__ == '__main__':
             help='Disjunct entities (disable collocation) on each server')
     parser.add_option('--superuser', action='store_true', default=False,
             help='Start the cluster and clients as superuser')
+    parser.add_option('--hugepage', action='store_true', default=False,
+            help='Allow servers to use hugepage memory')
 
     (options, args) = parser.parse_args()
 

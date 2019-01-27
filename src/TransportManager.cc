@@ -16,6 +16,7 @@
 
 #include "BasicTransport.h"
 #include "CycleCounter.h"
+#include "HomaTransport.h"
 #include "OptionParser.h"
 #include "ShortMacros.h"
 #include "RawMetrics.h"
@@ -27,6 +28,10 @@
 #include "WorkerManager.h"
 #include "WorkerSession.h"
 
+#ifdef DPDK
+#include "DpdkDriver.h"
+#endif
+
 #ifdef INFINIBAND
 #include "InfRcTransport.h"
 #include "InfUdDriver.h"
@@ -34,10 +39,6 @@
 
 #ifdef ONLOAD
 #include "SolarFlareDriver.h"
-#endif
-
-#ifdef DPDK
-#include "DpdkDriver.h"
 #endif
 
 namespace RAMCloud {
@@ -57,10 +58,21 @@ static struct BasicUdpTransportFactory : public TransportFactory {
     Transport* createTransport(Context* context,
             const ServiceLocator* localServiceLocator) {
         return new BasicTransport(context, localServiceLocator,
-                new UdpDriver(context, localServiceLocator),
+                new UdpDriver(context, localServiceLocator), true,
                 generateRandom());
     }
 } basicUdpTransportFactory;
+
+static struct HomaUdpTransportFactory : public TransportFactory {
+    HomaUdpTransportFactory()
+        : TransportFactory("homa+kernelUdp", "homa+udp") {}
+    Transport* createTransport(Context* context,
+            const ServiceLocator* localServiceLocator) {
+        return new HomaTransport(context, localServiceLocator,
+                new UdpDriver(context, localServiceLocator), true,
+                generateRandom());
+    }
+} homaUdpTransportFactory;
 
 #ifdef ONLOAD
 static struct BasicSolarFlareTransportFactory : public TransportFactory {
@@ -69,10 +81,21 @@ static struct BasicSolarFlareTransportFactory : public TransportFactory {
     Transport* createTransport(Context* context,
             const ServiceLocator* localServiceLocator) {
         return new BasicTransport(context, localServiceLocator,
-                new SolarFlareDriver(context, localServiceLocator),
+                new SolarFlareDriver(context, localServiceLocator), true,
                 generateRandom());
     }
 } basicSolarFlareTransportFactory;
+
+static struct HomaSolarFlareTransportFactory : public TransportFactory {
+    HomaSolarFlareTransportFactory()
+        : TransportFactory("homa+solarflare", "homa+sf") {}
+    Transport* createTransport(Context* context,
+            const ServiceLocator* localServiceLocator) {
+        return new HomaTransport(context, localServiceLocator,
+                new SolarFlareDriver(context, localServiceLocator), true,
+                generateRandom());
+    }
+} homaSolarFlareTransportFactory;
 #endif
 
 #ifdef INFINIBAND
@@ -82,10 +105,21 @@ static struct BasicInfUdTransportFactory : public TransportFactory {
     Transport* createTransport(Context* context,
             const ServiceLocator* localServiceLocator) {
         return new BasicTransport(context, localServiceLocator,
-                new InfUdDriver(context, localServiceLocator, false),
+                new InfUdDriver(context, localServiceLocator, false), true,
                 generateRandom());
     }
 } basicInfUdTransportFactory;
+
+static struct HomaInfUdTransportFactory : public TransportFactory {
+    HomaInfUdTransportFactory()
+        : TransportFactory("homa+infinibandud", "homa+infud") {}
+    Transport* createTransport(Context* context,
+            const ServiceLocator* localServiceLocator) {
+        return new HomaTransport(context, localServiceLocator,
+                new InfUdDriver(context, localServiceLocator, false), true,
+                generateRandom());
+    }
+} homaInfUdTransportFactory;
 
 static struct InfRcTransportFactory : public TransportFactory {
     InfRcTransportFactory()
@@ -101,7 +135,7 @@ static struct InfRcTransportFactory : public TransportFactory {
 #ifdef DPDK
 struct BasicDpdkTransportFactory : public TransportFactory {
     BasicDpdkTransportFactory()
-        : TransportFactory("basic+dpdk", "basic+dpdk"), driver(NULL)  {}
+        : TransportFactory("basic+dpdk"), driver(NULL)  {}
     Transport* createTransport(Context* context,
             const ServiceLocator* localServiceLocator) {
         if (driver == NULL) {
@@ -110,8 +144,8 @@ struct BasicDpdkTransportFactory : public TransportFactory {
                     "command-line option?)");
             throw TransportException(HERE, "DPDK is not enabled");
         }
-        return new BasicTransport(context, localServiceLocator,
-                driver, generateRandom());
+        return new BasicTransport(context, localServiceLocator, driver, false,
+                generateRandom());
     }
     void setDpdkDriver(DpdkDriver* driver) {
         this->driver = driver;
@@ -120,6 +154,28 @@ struct BasicDpdkTransportFactory : public TransportFactory {
     DISALLOW_COPY_AND_ASSIGN(BasicDpdkTransportFactory);
 };
 static BasicDpdkTransportFactory basicDpdkTransportFactory;
+
+struct HomaDpdkTransportFactory : public TransportFactory {
+    HomaDpdkTransportFactory()
+        : TransportFactory("homa+dpdk"), driver(NULL)  {}
+    Transport* createTransport(Context* context,
+            const ServiceLocator* localServiceLocator) {
+        if (driver == NULL) {
+            LOG(WARNING, "Tried to use homa+dpdk transport, but DPDK is "
+                    "not enabled (did you specify the --dpdkPort "
+                    "command-line option?)");
+            throw TransportException(HERE, "DPDK is not enabled");
+        }
+        return new HomaTransport(context, localServiceLocator, driver, false,
+                generateRandom());
+    }
+    void setDpdkDriver(DpdkDriver* driver) {
+        this->driver = driver;
+    }
+    DpdkDriver* driver;
+    DISALLOW_COPY_AND_ASSIGN(HomaDpdkTransportFactory);
+};
+static HomaDpdkTransportFactory homaDpdkTransportFactory;
 #endif
 
 /**
@@ -130,6 +186,7 @@ static BasicDpdkTransportFactory basicDpdkTransportFactory;
  */
 TransportManager::TransportManager(Context* context)
     : context(context)
+    , dpdkDriver()
     , isServer(false)
     , transportFactories()
     , transports()
@@ -143,20 +200,25 @@ TransportManager::TransportManager(Context* context)
 {
     transportFactories.push_back(&tcpTransportFactory);
     transportFactories.push_back(&basicUdpTransportFactory);
+    transportFactories.push_back(&homaUdpTransportFactory);
 #ifdef ONLOAD
     transportFactories.push_back(&basicSolarFlareTransportFactory);
+    transportFactories.push_back(&homaSolarFlareTransportFactory);
 #endif
 #ifdef INFINIBAND
     transportFactories.push_back(&basicInfUdTransportFactory);
+    transportFactories.push_back(&homaInfUdTransportFactory);
     transportFactories.push_back(&infRcTransportFactory);
 #endif
 #ifdef DPDK
     transportFactories.push_back(&basicDpdkTransportFactory);
+    transportFactories.push_back(&homaDpdkTransportFactory);
     if (context->options != NULL) {
         int dpdkPort = context->options->getDpdkPort();
         if (dpdkPort >= 0) {
-            basicDpdkTransportFactory.setDpdkDriver(
-                    new DpdkDriver(context, dpdkPort));
+            dpdkDriver = new DpdkDriver(context, dpdkPort);
+            basicDpdkTransportFactory.setDpdkDriver(dpdkDriver);
+            homaDpdkTransportFactory.setDpdkDriver(dpdkDriver);
         }
     }
 #endif
@@ -177,8 +239,15 @@ TransportManager::~TransportManager()
     while (mockRegistrations > 0)
         unregisterMock();
 #endif
-    foreach (auto transport, transports)
+    for (Transport* transport : transports) {
         delete transport;
+    }
+
+#ifdef DPDK
+    if (dpdkDriver) {
+        delete dpdkDriver;
+    }
+#endif
 }
 
 /**
@@ -300,16 +369,17 @@ TransportManager::getSession(const string& serviceLocator)
 {
     // If we're running on a server (i.e., multithreaded) must exclude
     // other threads.
-    Tub<std::lock_guard<SpinLock>> lock;
+    Tub<SpinLock::Guard> lock;
     if (isServer) {
         lock.construct(mutex);
     }
 
     // First check to see if we have already opened a session for the
     // locator; this should almost always be true.
-    auto it = sessionCache.find(serviceLocator);
-    if (it != sessionCache.end())
+    SessionCache::iterator it = sessionCache.find(serviceLocator);
+    if (it != sessionCache.end()) {
         return it->second;
+    }
 
     CycleCounter<RawMetric> counter;
 
